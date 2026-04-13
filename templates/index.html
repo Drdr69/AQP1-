@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AQP1 · Overlay QC</title>
+  <meta name="description" content="P&G AQP1 — Real-time AI overlay measurement.">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- ── Toasts ────────────────────────────────────────────────── -->
+<div id="notification-area"></div>
+
+<!-- ── Lightbox ─────────────────────────────────────────────── -->
+<div id="imageLightbox" class="lightbox" onclick="if(event.target===this)closeLightbox()">
+  <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
+  <img class="lightbox-content" id="lightboxImg" alt="">
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     SIDEBAR
+     ══════════════════════════════════════════════════════════ -->
+<aside class="sidebar">
+
+  <!-- Brand strip -->
+  <div class="sb-brand">
+    <img src="/static/pg_logo.png" alt="P&G">
+    <div>
+      <div class="sb-brand-label">P&amp;G · Production QC</div>
+      <div class="sb-brand-name">AQP1 Inspector</div>
+    </div>
+  </div>
+
+  <!-- ── Size / Spec ── -->
+  <div class="sb-section">
+    <span class="sb-label">📐 Size / Spec</span>
+    <select id="sizeSelect" class="form-control" onchange="updateConfig()">
+      <option value="S4">S4</option>
+      <option value="S5">S5</option>
+      <option value="S6">S6</option>
+      <option value="S7">S7</option>
+    </select>
+    <div class="tol-row">
+      <span>Tolerance ±</span>
+      <input type="number" id="toleranceInput" value="2" min="0.5" max="20" step="0.5" onchange="updateConfig()">
+      <span>mm</span>
+    </div>
+    <div class="preset-targets" id="specTargets" style="display:block">
+      Total Width: <strong id="specTW">—</strong> mm<br>
+      Dark Width: <strong id="specDW">—</strong> mm<br>
+      Total Length: <strong id="specTL">—</strong> mm<br>
+      Dark Height: <strong id="specDH">—</strong> mm
+    </div>
+  </div>
+
+  <div class="sb-divider"></div>
+
+  <!-- ── Neural Model ── -->
+  <div class="sb-section">
+    <span class="sb-label">🧠 Neural Model</span>
+    <select id="modelSelect" class="form-control" onchange="updateConfig()"></select>
+  </div>
+
+  <div class="sb-divider"></div>
+
+  <!-- ── Monitoring Source ── -->
+  <div class="sb-section">
+    <span class="sb-label">📡 Monitoring Source</span>
+    <select id="sourceMode" class="form-control" onchange="updateConfig()" style="margin-bottom:.45rem">
+      <option value="network">⚡ Network (Production)</option>
+      <option value="manual">📂 Local Folder</option>
+    </select>
+    <div id="streamRow">
+      <select id="streamChoice" class="form-control" onchange="updateConfig()"></select>
+    </div>
+    <div id="manualPathContainer" style="display:none; margin-top:.45rem">
+      <input type="text" id="manualPath" class="form-control"
+             placeholder="C:\Users\...\Images" onchange="updateConfig()">
+    </div>
+  </div>
+
+  <div class="sb-divider"></div>
+
+  <!-- ── Actions ── -->
+  <div class="sb-section">
+    <button class="sb-btn sb-btn-primary" onclick="skipTimer()">⏩ Process Next Image</button>
+    <button class="sb-btn sb-btn-ghost"   onclick="resetSession()">🔄 Reset Session</button>
+  </div>
+
+</aside>
+
+<!-- ══════════════════════════════════════════════════════════
+     MAIN CONTENT
+     ══════════════════════════════════════════════════════════ -->
+<div class="main-content">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img src="/static/pg_logo.png" alt="P&G" class="topbar-logo">
+      <div>
+        <div class="topbar-title">
+          <h1>AQP1 Overlay <span>Measurement</span></h1>
+        </div>
+        <div class="topbar-sub">Real-time AI overlay dimension QC · Production Line</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span class="last-updated">Updated: <span id="lastUpdated">—</span></span>
+      <button class="btn-ghost" onclick="fetchState()" title="Refresh now">⟳</button>
+    </div>
+  </header>
+
+  <!-- Page body -->
+  <div class="page-body">
+
+    <!-- ── Quick Analysis ── -->
+    <div class="card">
+      <div class="section-header">
+        <h2>🧪 Quick Analysis</h2>
+        <span class="pill-badge">Manual Upload</span>
+      </div>
+      <p style="color:var(--text-muted);font-size:.87rem;margin:0 0 1rem">
+        Upload any production image to measure it instantly with the active model.
+      </p>
+
+      <label class="adp4-upload-box" for="imageUpload" id="uploadZone">
+        <div class="upload-icon">🌩️</div>
+        <strong>Drag &amp; drop</strong> an image here
+        <p style="font-size:.85rem;color:var(--text-muted);margin:.25rem 0 0">
+          or click to browse — PNG, JPG, TIFF, BMP
+        </p>
+        <input type="file" id="imageUpload"
+               accept="image/png,image/jpeg,image/jpg,image/tiff,image/bmp"
+               onchange="handleUpload(event)">
+      </label>
+
+      <div id="uploadProcessing" style="display:none;text-align:center;padding:1.5rem;color:var(--text-muted)">
+        <div class="inline-spin"></div> Analysing with AI engine…
+      </div>
+
+      <div id="uploadError" style="display:none;margin-top:1rem">
+        <div class="upload-error-banner" id="uploadErrorMsg">
+          ⚠️ Could not detect overlay in this image.
+        </div>
+      </div>
+
+      <div id="uploadPreview" style="display:none;margin-top:1rem">
+
+        <!-- Pad Core Measurement table -->
+        <div style="margin-top:.9rem;overflow-x:auto">
+          <div style="font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:.45rem">Pad Core Measurements</div>
+          <table id="uploadMeasTable" style="width:100%;border-collapse:collapse;font-size:.86rem">
+            <thead>
+              <tr style="background:var(--surface2);border-bottom:2px solid var(--border)">
+                <th style="text-align:left;padding:.55rem .9rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);white-space:nowrap">Process</th>
+                <th style="text-align:center;padding:.55rem .9rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);white-space:nowrap">Actual (mm)</th>
+                <th style="text-align:center;padding:.55rem .9rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);white-space:nowrap">Target (mm)</th>
+                <th style="text-align:center;padding:.55rem .9rem;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);white-space:nowrap">Delta (mm)</th>
+              </tr>
+            </thead>
+            <tbody id="uploadMeasTableBody"></tbody>
+          </table>
+        </div>
+
+        <div class="result-pair" id="uploadImageGrid"></div>
+      </div>
+    </div>
+
+    <!-- ── Continuous Monitoring ── -->
+    <div>
+      <div class="section-header">
+        <h2>📊 Continuous Monitoring</h2>
+        <span id="monitorBadge" class="pill-badge">⌛ Waiting</span>
+      </div>
+
+      <!-- Metric cards -->
+      <div class="metrics-grid" style="margin-bottom:1rem">
+        <div class="metric-card">
+          <div class="metric-label">📁 Active Source</div>
+          <div class="metric-path" id="activeSourceText">—</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">🎞️ Images in Queue</div>
+          <div class="metric-value" id="imagesFoundMetric">0</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">⏱️ Next Capture In</div>
+          <div class="metric-value text-coral" id="countdownTimer">—</div>
+          <div class="metric-sub" id="tableBatchInfo">Table 1 · Image 0/8</div>
+        </div>
+      </div>
+
+      <!-- Results table -->
+      <div class="card" style="padding:1.2rem 1.5rem">
+        <div id="tableTabs" class="tabs"></div>
+        <div id="tableContentContainer" class="table-container">
+          <div class="empty-state">
+            <div class="empty-icon">📡</div>
+            <div class="empty-title">No measurements yet</div>
+            <div class="empty-desc">
+              Use <strong>Quick Analysis</strong> above, or switch to
+              <strong>Local Folder</strong> mode and click
+              <strong>⏩ Process Next Image</strong>.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /page-body -->
+</div><!-- /main-content -->
+
+<!-- ══════════════════════════════════════════════════════════
+     JAVASCRIPT
+     ══════════════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+// ── State ───────────────────────────────────────────────────
+let systemState  = {};
+let _timerSec    = 0;
+let _tableSnap   = '';
+let activeTabBatch = null;
+
+// ── Local countdown (1 Hz, zero server cost) ────────────────
+setInterval(() => {
+  if (_timerSec > 0) { _timerSec--; _renderTimer(); }
+}, 1000);
+
+function _renderTimer() {
+  const r  = Math.max(0, _timerSec);
+  const hh = Math.floor(r / 3600);
+  const mm = Math.floor((r % 3600) / 60);
+  const ss = r % 60;
+  const el = document.getElementById('countdownTimer');
+  if (el) el.textContent = hh > 0
+    ? `${hh}h ${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s`
+    : `${String(mm).padStart(2,'0')}m ${String(ss).padStart(2,'0')}s`;
+}
+
+// ── Server sync (every 4 s) ─────────────────────────────────
+async function fetchState() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) return;
+    systemState = await r.json();
+    _timerSec = Math.max(0, systemState.timer_remaining || 0);
+    _renderTimer();
+    const lu = document.getElementById('lastUpdated');
+    if (lu) lu.textContent = new Date().toLocaleTimeString();
+    updateUI();
+  } catch(e) { /* server offline */ }
+}
+
+setInterval(fetchState, 4000);
+fetchState();
+
+// ── Toast notifications ─────────────────────────────────────
+function notify(msg, type) {
+  const area = document.getElementById('notification-area');
+  const el   = document.createElement('div');
+  el.className = 'alert' + (type === 'error' ? ' error' : '');
+  el.innerHTML = msg;
+  area.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ── Config sync ─────────────────────────────────────────────
+async function updateConfig() {
+  const mode = document.getElementById('sourceMode').value;
+  document.getElementById('manualPathContainer').style.display = mode === 'manual' ? 'block' : 'none';
+  document.getElementById('streamRow').style.display           = mode === 'network' ? 'block' : 'none';
+
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      model:         document.getElementById('modelSelect').value,
+      size:          document.getElementById('sizeSelect').value,
+      stream:        document.getElementById('streamChoice').value,
+      source_mode:   mode,
+      manual_path:   document.getElementById('manualPath').value,
+      tolerance_mm:  parseFloat(document.getElementById('toleranceInput').value) || 2,
+    })
+  });
+  fetchState();
+}
+
+async function skipTimer() {
+  notify('⏩ Processing next image in queue…');
+  await fetch('/api/skip_timer', {method: 'POST'});
+  fetchState();
+}
+
+async function resetSession() {
+  if (!confirm('Clear all measurement history for this session?')) return;
+  await fetch('/api/reset', {method: 'POST'});
+  _tableSnap = '';
+  fetchState();
+  notify('🔄 Session cleared.');
+}
+
+// ── Spec target readout ──────────────────────────────────────
+function _showSpecTargets() {
+  const size  = (systemState.config && systemState.config.size) || document.getElementById('sizeSelect').value;
+  const specs = (systemState.size_specs || {})[size] || {};
+  document.getElementById('specTW').textContent = specs.total_width_mm      != null ? specs.total_width_mm      : '—';
+  document.getElementById('specDW').textContent = specs.dark_area_width_mm  != null ? specs.dark_area_width_mm  : '—';
+  document.getElementById('specTL').textContent = specs.total_length_mm     != null ? specs.total_length_mm     : '—';
+  document.getElementById('specDH').textContent = specs.dark_area_height_mm != null ? specs.dark_area_height_mm : '—';
+}
+
+// ── Upload ───────────────────────────────────────────────────
+const uploadZone = document.getElementById('uploadZone');
+uploadZone.addEventListener('dragover',  e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault(); uploadZone.classList.remove('dragover');
+  const f = e.dataTransfer.files[0]; if (f) processFile(f);
+});
+
+function handleUpload(ev) { const f = ev.target.files[0]; if (f) processFile(f); }
+
+async function processFile(file) {
+  document.getElementById('uploadPreview').style.display    = 'none';
+  document.getElementById('uploadError').style.display      = 'none';
+  document.getElementById('uploadProcessing').style.display = 'block';
+
+  const fd = new FormData();
+  fd.append('image', file);
+  fd.append('size', document.getElementById('sizeSelect').value);
+
+  try {
+    const res  = await fetch('/api/upload', {method: 'POST', body: fd});
+    const data = await res.json();
+    document.getElementById('uploadProcessing').style.display = 'none';
+
+    if (data.success) {
+      const m = data.measurements || {};
+
+      // Pad core measurement table — core dimensions only, no pass/fail
+      const CORE_ROWS = [
+        { key: 'dark_area_width',  label: 'Core Width'  },
+        { key: 'dark_area_height', label: 'Core Length' },
+      ];
+      const tbody = document.getElementById('uploadMeasTableBody');
+      tbody.innerHTML = CORE_ROWS.map(({ key, label }) => {
+        const v      = m[key];
+        const actual = v?.measured_mm  ?? null;
+        const target = v?.reference_mm ?? null;
+        const delta  = (actual != null && target != null)
+                         ? (actual - target).toFixed(2)
+                         : null;
+        const sign   = delta != null && delta > 0 ? '+' : '';
+        const deltaCol = delta == null
+          ? 'var(--text-faint)'
+          : (parseFloat(delta) === 0 ? 'var(--text-muted)' : (parseFloat(delta) > 0 ? 'var(--pg-blue)' : 'var(--text)'));
+        return `<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:.65rem .9rem;font-weight:600;color:var(--text)">${label}</td>
+          <td style="padding:.65rem .9rem;text-align:center;font-variant-numeric:tabular-nums;font-weight:700;color:var(--pg-navy-mid)">${actual ?? '—'}</td>
+          <td style="padding:.65rem .9rem;text-align:center;font-variant-numeric:tabular-nums;color:var(--text-muted)">${target ?? '—'}</td>
+          <td style="padding:.65rem .9rem;text-align:center;font-variant-numeric:tabular-nums;font-weight:600;color:${deltaCol}">${delta != null ? sign + delta : '—'}</td>
+        </tr>`;
+      }).join('');
+
+      // Image pair
+      const imgGrid = document.getElementById('uploadImageGrid');
+      imgGrid.className = 'result-pair';
+      imgGrid.innerHTML = `
+        <div>
+          <img src="/cache/${data.raw_image}" onclick="openLightbox('/cache/${data.raw_image}')" alt="Original">
+          <div class="result-caption">Original</div>
+        </div>
+        <div>
+          <img src="/cache/${data.annotated_image}" onclick="openLightbox('/cache/${data.annotated_image}')" alt="AI Annotated">
+          <div class="result-caption">AI Annotated</div>
+        </div>`;
+
+      document.getElementById('uploadPreview').style.display = 'block';
+      fetchState();
+    } else {
+      document.getElementById('uploadError').style.display = 'block';
+      document.getElementById('uploadErrorMsg').textContent =
+        '⚠️ ' + (data.error || 'No overlay detected. Try a different image or model.');
+    }
+  } catch(e) {
+    document.getElementById('uploadProcessing').style.display = 'none';
+    document.getElementById('uploadError').style.display      = 'block';
+    document.getElementById('uploadErrorMsg').textContent     = '⚠️ Upload failed. Is the server running?';
+  }
+}
+
+// ── Main UI sync ─────────────────────────────────────────────
+function updateUI() {
+  if (!systemState.config) return;
+  const cfg      = systemState.config;
+  const notEditing = !['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName);
+
+  if (notEditing) {
+    // Model dropdown
+    const ms = document.getElementById('modelSelect');
+    if (systemState.available_models && systemState.available_models.length) {
+      const cur = Array.from(ms.options).map(o => o.value).join(',');
+      const nxt = systemState.available_models.map(m => m.file).join(',');
+      if (cur !== nxt) {
+        ms.innerHTML = '';
+        systemState.available_models.forEach(m => ms.add(new Option(m.name, m.file)));
+      }
+    }
+    if (cfg.model) ms.value = cfg.model;
+
+    // Size
+    if (cfg.size) document.getElementById('sizeSelect').value = cfg.size;
+
+    // Tolerance
+    if (systemState.tolerance_mm != null) {
+      document.getElementById('toleranceInput').value = systemState.tolerance_mm;
+    }
+
+    // Source mode
+    const sm = cfg.source_mode || 'network';
+    document.getElementById('sourceMode').value = sm;
+    document.getElementById('manualPathContainer').style.display = sm === 'manual' ? 'block' : 'none';
+    document.getElementById('streamRow').style.display           = sm === 'network' ? 'block' : 'none';
+    document.getElementById('manualPath').value = cfg.manual_path || '';
+
+    // Streams
+    const sc = document.getElementById('streamChoice');
+    if (systemState.available_streams && systemState.available_streams.length) {
+      const cur = Array.from(sc.options).map(o => o.value).join(',');
+      const nxt = systemState.available_streams.join(',');
+      if (cur !== nxt) {
+        sc.innerHTML = '';
+        systemState.available_streams.forEach(s => sc.add(new Option(s, s)));
+      }
+    }
+    if (cfg.stream) sc.value = cfg.stream;
+  }
+
+  _showSpecTargets();
+
+  // Metrics
+  document.getElementById('activeSourceText').textContent  = cfg.resolved_path || '—';
+  document.getElementById('imagesFoundMetric').textContent = systemState.images_found_count || '0';
+
+  const batchImgs = systemState.current_batch_images || [];
+  document.getElementById('tableBatchInfo').textContent =
+    `Table ${systemState.current_batch || 1} · Image ${batchImgs.length}/8`;
+
+  const imgCount = (systemState.processed_images || []).length;
+  document.getElementById('monitorBadge').textContent =
+    imgCount > 0 ? `✅ ${imgCount} processed` : '⌛ Waiting';
+
+  renderTables();
+}
+
+// ── Tables ───────────────────────────────────────────────────
+function renderTables() {
+  const images  = systemState.processed_images || [];
+  const batches = [...new Set(images.map(i => i.batch_num))].sort((a,b) => b - a);
+
+  const snap = batches.join(',') + '|' + images.length + '|' + activeTabBatch;
+  if (snap === _tableSnap) return;
+  _tableSnap = snap;
+
+  const tabsDiv    = document.getElementById('tableTabs');
+  const contentDiv = document.getElementById('tableContentContainer');
+
+  if (batches.length === 0) {
+    tabsDiv.innerHTML = '';
+    contentDiv.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <div class="empty-title">No measurements yet</div>
+        <div class="empty-desc">Use <strong>Quick Analysis</strong> above, or switch to
+          <strong>Local Folder</strong> mode and click <strong>⏩ Process Next Image</strong>.</div>
+      </div>`;
+    return;
+  }
+
+  if (!activeTabBatch || !batches.includes(activeTabBatch)) activeTabBatch = batches[0];
+
+  tabsDiv.innerHTML = batches.map(b =>
+    `<div class="tab ${b === activeTabBatch ? 'active' : ''}" onclick="activeTabBatch=${b};_tableSnap='';renderTables()">
+       Table ${b}
+     </div>`
+  ).join('');
+
+  const rows = images.filter(i => i.batch_num === activeTabBatch);
+
+  // Format a measurement cell: "actual (Δ delta)"
+  const mCell = (m, key) => {
+    if (!m || !m[key]) return '<td style="color:var(--text-faint);text-align:center;font-size:.8rem">—</td>';
+    const v      = m[key];
+    const pass   = v.pass !== false;
+    const col    = pass ? 'var(--pass)' : 'var(--fail)';
+    const actual = v.measured_mm;
+    const target = v.reference_mm;
+    const delta  = (actual != null && target != null)
+                     ? (actual - target).toFixed(1)
+                     : null;
+    const sign   = delta > 0 ? '+' : '';
+    const deltaStr = delta != null
+      ? `<span style="font-size:.72rem;color:${col};display:block">Δ ${sign}${delta}</span>`
+      : '';
+    return `<td style="text-align:center;vertical-align:middle">
+      <span class="dim-cell" style="color:${col}">${actual}</span>${deltaStr}
+    </td>`;
+  };
+
+  let html = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.9rem">
+      <h4 style="font-size:.95rem;font-weight:700;color:var(--text)">📋 Table ${activeTabBatch}</h4>
+      <span style="font-size:.78rem;color:var(--text-muted)">${rows.length}/8 measurements</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>#</th>
+        <th>Filename</th>
+        <th>Size</th>
+        <th style="text-align:center">Total Width</th>
+        <th style="text-align:center">Dark Width</th>
+        <th style="text-align:center">Total Length</th>
+        <th style="text-align:center">Dark Height</th>
+        <th style="text-align:center">Result</th>
+        <th>Time</th>
+        <th>Preview</th>
+      </tr></thead>
+      <tbody>`;
+
+  rows.forEach(img => {
+    const m    = img.measurements || {};
+    const pass = img.overall_pass;
+    const resultCell = pass
+      ? `<td class="spec-pass"><span class="lbl">✅ PASS</span></td>`
+      : `<td class="spec-fail"><span class="lbl">❌ FAIL</span></td>`;
+
+    html += `<tr>
+      <td style="color:var(--text-muted);font-weight:600;font-size:.85rem">${img.local_num}</td>
+      <td style="font-family:monospace;font-size:.77rem;max-width:160px;overflow:hidden;
+                 text-overflow:ellipsis;white-space:nowrap" title="${img.filename}">${img.filename}</td>
+      <td><span class="status-badge">${img.size || '—'}</span></td>
+      ${mCell(m, 'total_width')}
+      ${mCell(m, 'dark_area_width')}
+      ${mCell(m, 'total_length')}
+      ${mCell(m, 'dark_area_height')}
+      ${resultCell}
+      <td style="font-size:.8rem;color:var(--text-muted);white-space:nowrap">${img.time_processed}</td>
+      <td class="thumb-btn">
+        <img src="/cache/${img.annotated_image}"
+             onclick="openLightbox('/cache/${img.annotated_image}')"
+             title="Click to enlarge" alt="">
+      </td>
+    </tr>`;
+  });
+
+  html += `</tbody></table>`;
+  contentDiv.innerHTML = html;
+}
+
+// ── Lightbox ─────────────────────────────────────────────────
+function openLightbox(src) {
+  document.getElementById('imageLightbox').style.display = 'block';
+  document.getElementById('lightboxImg').src = src;
+}
+function closeLightbox() {
+  document.getElementById('imageLightbox').style.display = 'none';
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+</script>
+</body>
+</html>

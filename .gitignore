@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude Code
+.claude/
+
+# Training images (large — add your own locally)
+Training Data S4/
+training_data/train/images/
+training_data/val/images/
+
+# Cache / uploads (runtime-generated)
+static/cache/
+uploads/
+
+# YOLO training run outputs (large)
+runs/
+
+# Epoch checkpoints (keep only final best)
+models/aqp1_S4_e*.pt
+
+# Environment
+.env
+venv/
+.venv/
