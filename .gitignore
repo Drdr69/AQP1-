@@ -14,10 +14,18 @@ __pycache__/
 # Claude Code
 .claude/
 
-# Training images (large — add your own locally)
+# Training images and labels (add your own locally)
 Training Data S4/
 training_data/train/images/
 training_data/val/images/
+training_data/train/labels/
+training_data/val/labels/
+training_data/**/*.cache
+
+# Base YOLO model (download separately)
+yolo11n-seg.pt
+yolo11s-seg.pt
+yolo11m-seg.pt
 
 # Cache / uploads (runtime-generated)
 static/cache/
