@@ -2,18 +2,19 @@
 AQP1 - Overlay Image Measurement System
 =========================================
 Monitors the daily network share once per hour, runs each image through the
-trained YOLO segmentation model, extracts four key mm measurements, and
+trained YOLO segmentation model, extracts key mm measurements, and
 surfaces live results through a Flask web UI accessible on the network.
 
 Network path (auto-resolved by date + size):
-    \\BlissOC110.bcc.pg.com\Images\PBQA\Overlay\YYYY_MM\DD\CLPN_{SIZE}[]\VISAQP1
+    \\BlissOC110.bcc.pg.com\Images\PBQA\Processed\YYYY_MM\DD\CLPN_{SIZE}[]\VISAQP1
 
-Four measurements extracted per image (all in mm):
+Five measurements extracted per image (all in mm):
     ┌─────────────────────────────┬───────────┐
-    │  total_width                │  120 mm   │
-    │  dark_area_width            │   80 mm   │
-    │  total_length               │  370 mm   │
-    │  dark_area_height           │  340 mm   │
+    │  total_width  (overlay)     │  120 mm   │
+    │  total_length (overlay)     │  370 mm   │
+    │  core_width   (pad core)    │  110 mm   │
+    │  core_height  (pad core)    │  340 mm   │
+    │  s_wrap_height              │   15 mm   │
     └─────────────────────────────┴───────────┘
 """
 
@@ -243,108 +244,106 @@ def within_tolerance(measured: float, reference: float, tol: float) -> bool:
 
 
 def _draw_measurements(img: np.ndarray,
-                       outer: dict | None,
-                       core:  dict | None,
+                       outer:  dict | None,
+                       core:   dict | None,
+                       s_wrap: dict | None,
                        measurements: dict,
                        sx: float, sy: float) -> np.ndarray:
     """
-    Engineering-style measurement overlay:
-      - Thin bounding box per region (no fill)
-      - Extension lines + dimension lines drawn in the dark margins
-        (above the box for width, left margin for height)
-      - Clean label pill (text on filled rounded rect) centred on each line
+    Engineering-style measurement overlay.
+      Class 0 (overlay_outer) — green:   total_width + total_length
+      Class 1 (pad_core)      — cyan:    core_width  + core_height
+      Class 2 (s_wrap)        — orange:  s_wrap_height only (height dim on right)
     """
     h, w = img.shape[:2]
 
     # ── Adaptive sizing ────────────────────────────────────────────
-    ref       = min(w, h)
-    LINE_T    = max(1, ref // 600)          # box outline thickness
-    DIM_T     = max(1, ref // 800)          # dimension line thickness
-    FONT      = cv2.FONT_HERSHEY_SIMPLEX
-    FS        = max(0.30, ref / 1800.0)     # font scale
-    FT        = max(1, ref // 700)          # font thickness
-    EXT       = max(8,  ref // 80)          # extension line overshoot
-    GAP       = max(6,  ref // 120)         # gap between box edge and dim line
-    PAD       = max(3,  ref // 280)         # text pill padding
+    ref    = min(w, h)
+    LINE_T = max(1, ref // 600)
+    DIM_T  = max(1, ref // 800)
+    FONT   = cv2.FONT_HERSHEY_SIMPLEX
+    FS     = max(0.30, ref / 1800.0)
+    FT     = max(1, ref // 700)
+    EXT    = max(8,  ref // 80)
+    GAP    = max(6,  ref // 120)
+    PAD    = max(3,  ref // 280)
 
     # ── Colours (BGR) ─────────────────────────────────────────────
-    C_OUTER  = (50,  220,  80)   # green   — overlay_outer
-    C_CORE   = (40,  200, 255)   # yellow  — dark_core
-    C_FAIL   = (40,   60, 230)   # red
-    C_BG     = (20,   20,  20)   # near-black pill background
-    C_WHITE  = (255, 255, 255)
-
-    def _col(key):
-        base = C_OUTER if key in ("total_width", "total_length") else C_CORE
-        return C_FAIL if measurements.get(key, {}).get("pass") is False else base
+    C_OUTER  = ( 50, 220,  80)   # green  — overlay_outer
+    C_CORE   = ( 40, 200, 255)   # cyan   — pad_core
+    C_SWRAP  = ( 30, 130, 255)   # orange — s_wrap
+    C_BG     = ( 20,  20,  20)   # dark pill background
 
     def _mm(key):
         v = measurements.get(key, {}).get("measured_mm")
         return f"{v} mm" if v is not None else "—"
 
     def _pill(canvas, text, cx, cy, color):
-        """Draw text centred at (cx, cy) inside a filled dark pill."""
         (tw, th), bl = cv2.getTextSize(text, FONT, FS, FT)
-        rx1 = int(cx - tw // 2 - PAD)
-        ry1 = int(cy - th - PAD)
-        rx2 = int(cx + tw // 2 + PAD)
-        ry2 = int(cy + bl + PAD)
-        # clamp to image
-        rx1, ry1 = max(0, rx1), max(0, ry1)
-        rx2, ry2 = min(w - 1, rx2), min(h - 1, ry2)
+        rx1 = max(0,     int(cx - tw // 2 - PAD))
+        ry1 = max(0,     int(cy - th     - PAD))
+        rx2 = min(w - 1, int(cx + tw // 2 + PAD))
+        ry2 = min(h - 1, int(cy + bl     + PAD))
         cv2.rectangle(canvas, (rx1, ry1), (rx2, ry2), C_BG, -1)
         cv2.rectangle(canvas, (rx1, ry1), (rx2, ry2), color, DIM_T)
         cv2.putText(canvas, text, (int(cx - tw // 2), int(cy)),
                     FONT, FS, color, FT, cv2.LINE_AA)
 
-    def _draw_region(canvas, det, w_key, h_key):
-        x1 = max(0, int(det["x1"]))
-        y1 = max(0, int(det["y1"]))
+    def _draw_region(canvas, det, w_key, h_key, color):
+        """Draw bounding box + width (above) + height (left) dimension lines."""
+        x1 = max(0,     int(det["x1"]))
+        y1 = max(0,     int(det["y1"]))
         x2 = min(w - 1, int(det["x2"]))
         y2 = min(h - 1, int(det["y2"]))
-        cw = _col(w_key)
-        ch = _col(h_key)
         mx = (x1 + x2) // 2
         my = (y1 + y2) // 2
-
-        # ── Thin bounding box (no fill) ────────────────────────────
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), cw, LINE_T)
-
-        # ── Width dimension  (above the box) ──────────────────────
-        dim_y  = max(EXT + GAP + 2, y1 - GAP)
-        ext_y0 = max(0, dim_y - EXT)
-        ext_y1 = min(h - 1, dim_y + EXT)
-        # extension lines down from box top corners
-        cv2.line(canvas, (x1, y1),    (x1, ext_y1), cw, DIM_T)
-        cv2.line(canvas, (x2, y1),    (x2, ext_y1), cw, DIM_T)
-        # horizontal dimension line
-        cv2.line(canvas, (x1, dim_y), (x2, dim_y),  cw, DIM_T)
-        # small inward arrow ticks
         ak = max(4, EXT // 2)
-        cv2.line(canvas, (x1, dim_y), (x1 + ak, dim_y), cw, DIM_T + 1)
-        cv2.line(canvas, (x2, dim_y), (x2 - ak, dim_y), cw, DIM_T + 1)
-        # label pill centred on dimension line
-        _pill(canvas, _mm(w_key), mx, dim_y, cw)
 
-        # ── Height dimension  (left of the box) ───────────────────
-        dim_x  = max(EXT + GAP + 2, x1 - GAP)
-        ext_x0 = max(0, dim_x - EXT)
-        ext_x1 = min(w - 1, dim_x + EXT)
-        # extension lines from box left edge
-        cv2.line(canvas, (x1, y1),    (ext_x1, y1), ch, DIM_T)
-        cv2.line(canvas, (x1, y2),    (ext_x1, y2), ch, DIM_T)
-        # vertical dimension line
-        cv2.line(canvas, (dim_x, y1), (dim_x, y2),  ch, DIM_T)
-        # small inward arrow ticks
-        cv2.line(canvas, (dim_x, y1), (dim_x, y1 + ak), ch, DIM_T + 1)
-        cv2.line(canvas, (dim_x, y2), (dim_x, y2 - ak), ch, DIM_T + 1)
-        # label pill centred on dimension line
-        _pill(canvas, _mm(h_key), dim_x, my, ch)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, LINE_T)
+
+        if w_key:
+            dim_y = max(EXT + GAP + 2, y1 - GAP)
+            cv2.line(canvas, (x1, y1),    (x1, min(h-1, dim_y + EXT)), color, DIM_T)
+            cv2.line(canvas, (x2, y1),    (x2, min(h-1, dim_y + EXT)), color, DIM_T)
+            cv2.line(canvas, (x1, dim_y), (x2, dim_y),                 color, DIM_T)
+            cv2.line(canvas, (x1, dim_y), (x1 + ak, dim_y),            color, DIM_T + 1)
+            cv2.line(canvas, (x2, dim_y), (x2 - ak, dim_y),            color, DIM_T + 1)
+            _pill(canvas, _mm(w_key), mx, dim_y, color)
+
+        if h_key:
+            dim_x = max(EXT + GAP + 2, x1 - GAP)
+            cv2.line(canvas, (x1, y1),    (min(w-1, dim_x + EXT), y1), color, DIM_T)
+            cv2.line(canvas, (x1, y2),    (min(w-1, dim_x + EXT), y2), color, DIM_T)
+            cv2.line(canvas, (dim_x, y1), (dim_x, y2),                 color, DIM_T)
+            cv2.line(canvas, (dim_x, y1), (dim_x, y1 + ak),            color, DIM_T + 1)
+            cv2.line(canvas, (dim_x, y2), (dim_x, y2 - ak),            color, DIM_T + 1)
+            _pill(canvas, _mm(h_key), dim_x, my, color)
+
+    def _draw_height_right(canvas, det, h_key, color):
+        """Draw bounding box + height dimension on the RIGHT side (for s_wrap)."""
+        x1 = max(0,     int(det["x1"]))
+        y1 = max(0,     int(det["y1"]))
+        x2 = min(w - 1, int(det["x2"]))
+        y2 = min(h - 1, int(det["y2"]))
+        my = (y1 + y2) // 2
+        ak = max(4, EXT // 2)
+
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, LINE_T)
+
+        dim_x = min(w - EXT - GAP - 2, x2 + GAP)
+        cv2.line(canvas, (x2, y1), (max(0, dim_x - EXT), y1), color, DIM_T)
+        cv2.line(canvas, (x2, y2), (max(0, dim_x - EXT), y2), color, DIM_T)
+        cv2.line(canvas, (dim_x, y1), (dim_x, y2),             color, DIM_T)
+        cv2.line(canvas, (dim_x, y1), (dim_x, y1 + ak),        color, DIM_T + 1)
+        cv2.line(canvas, (dim_x, y2), (dim_x, y2 - ak),        color, DIM_T + 1)
+        _pill(canvas, _mm(h_key), dim_x, my, color)
 
     if outer:
-        _draw_region(img, outer, "total_width",     "total_length")
+        _draw_region(img, outer, "total_width", "total_length", C_OUTER)
     if core:
-        _draw_region(img, core,  "dark_area_width", "dark_area_height")
+        _draw_region(img, core,  "core_width",  "core_height",  C_CORE)
+    if s_wrap:
+        _draw_height_right(img, s_wrap, "s_wrap_height", C_SWRAP)
 
     return img
 
@@ -379,7 +378,7 @@ def run_inference(image_bgr: np.ndarray, model, size: str = "S4") -> dict | None
         return None
 
     # Collect detections per class (keep coords for drawing)
-    detections: dict[int, list] = {0: [], 1: []}
+    detections: dict[int, list] = {0: [], 1: [], 2: []}
     for box in boxes:
         cls_id = int(box.cls[0].item())
         conf   = float(box.conf[0].item())
@@ -397,13 +396,13 @@ def run_inference(image_bgr: np.ndarray, model, size: str = "S4") -> dict | None
         dets = detections[cls_id]
         return max(dets, key=lambda d: d["conf"]) if dets else None
 
-    outer = best(0)
-    core  = best(1)
+    outer  = best(0)
+    core   = best(1)
+
+    # S-wrap: single zone at the top of the pad
+    s_wrap = best(2)
 
     # ── Self-calibrating scale ────────────────────────────────────────────
-    # If the outer overlay is detected and its reference size is known,
-    # derive mm/px directly from this frame rather than using a fixed constant.
-    # This eliminates errors from varying camera distances or image crop sizes.
     ref_tw = spec.get("total_width_mm")
     ref_tl = spec.get("total_length_mm")
     if outer and ref_tw and outer["w_px"] > 0:
@@ -415,22 +414,21 @@ def run_inference(image_bgr: np.ndarray, model, size: str = "S4") -> dict | None
     else:
         sy = sy_fixed
 
-    print(f"[CAL] sx={sx:.5f} mm/px  sy={sy:.5f} mm/px"
-          f"  (outer {outer['w_px']:.0f}×{outer['h_px']:.0f} px)" if outer else
-          f"[CAL] using fixed sx={sx:.5f}  sy={sy:.5f}")
+    if outer:
+        print(f"[CAL] sx={sx:.5f} mm/px  sy={sy:.5f} mm/px"
+              f"  (outer {outer['w_px']:.0f}x{outer['h_px']:.0f} px)")
+    else:
+        print(f"[CAL] using fixed sx={sx:.5f}  sy={sy:.5f}")
 
     measurements = {}
 
     if outer:
-        # Total width/length are exactly the reference by construction when
-        # self-calibrating — report the reference value directly so the display
-        # shows the true physical size rather than a floating-point echo.
         tw_mm = ref_tw if ref_tw else px_to_mm(outer["w_px"], sx)
         tl_mm = ref_tl if ref_tl else px_to_mm(outer["h_px"], sy)
         measurements["total_width"]  = {
             "measured_mm":  tw_mm,
             "reference_mm": ref_tw,
-            "pass": True,   # outer is the calibration reference; always passes
+            "pass": True,
             "conf": round(outer["conf"], 3),
         }
         measurements["total_length"] = {
@@ -441,19 +439,31 @@ def run_inference(image_bgr: np.ndarray, model, size: str = "S4") -> dict | None
         }
 
     if core:
-        dw_mm = px_to_mm(core["w_px"], sx)
-        dh_mm = px_to_mm(core["h_px"], sy)
-        measurements["dark_area_width"]  = {
-            "measured_mm":  dw_mm,
-            "reference_mm": spec.get("dark_area_width_mm"),
-            "pass": within_tolerance(dw_mm, spec.get("dark_area_width_mm", dw_mm), tol),
+        cw_mm  = px_to_mm(core["w_px"], sx)
+        ch_mm  = px_to_mm(core["h_px"], sy)
+        ref_cw = spec.get("core_width_mm")
+        ref_ch = spec.get("core_height_mm")
+        measurements["core_width"]  = {
+            "measured_mm":  cw_mm,
+            "reference_mm": ref_cw,
+            "pass": within_tolerance(cw_mm, ref_cw if ref_cw else cw_mm, tol),
             "conf": round(core["conf"], 3),
         }
-        measurements["dark_area_height"] = {
-            "measured_mm":  dh_mm,
-            "reference_mm": spec.get("dark_area_height_mm"),
-            "pass": within_tolerance(dh_mm, spec.get("dark_area_height_mm", dh_mm), tol),
+        measurements["core_height"] = {
+            "measured_mm":  ch_mm,
+            "reference_mm": ref_ch,
+            "pass": within_tolerance(ch_mm, ref_ch if ref_ch else ch_mm, tol),
             "conf": round(core["conf"], 3),
+        }
+
+    if s_wrap:
+        sw_mm  = px_to_mm(s_wrap["h_px"], sy)
+        ref_sw = spec.get("s_wrap_height_mm")
+        measurements["s_wrap_height"] = {
+            "measured_mm":  sw_mm,
+            "reference_mm": ref_sw,
+            "pass": within_tolerance(sw_mm, ref_sw if ref_sw else sw_mm, tol),
+            "conf": round(s_wrap["conf"], 3),
         }
 
     if not measurements:
@@ -462,12 +472,13 @@ def run_inference(image_bgr: np.ndarray, model, size: str = "S4") -> dict | None
     overall_pass = all(v["pass"] for v in measurements.values() if "pass" in v)
 
     # Draw clean minimal annotation
-    annotated = _draw_measurements(image_bgr.copy(), outer, core, measurements, sx, sy)
+    annotated = _draw_measurements(image_bgr.copy(), outer, core, s_wrap,
+                                   measurements, sx, sy)
 
     return {
-        "success":      True,
-        "measurements": measurements,
-        "overall_pass": overall_pass,
+        "success":         True,
+        "measurements":    measurements,
+        "overall_pass":    overall_pass,
         "annotated_frame": annotated,
     }
 

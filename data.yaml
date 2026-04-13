@@ -1,7 +1,8 @@
 names:
   0: overlay_outer
-  1: dark_core
-nc: 2
+  1: pad_core
+  2: s_wrap
+nc: 3
 path: /Users/ahmad.aldarderi/Desktop/AQP1 - Prototype/training_data
 train: /Users/ahmad.aldarderi/Desktop/AQP1 - Prototype/training_data/train/images
 val: /Users/ahmad.aldarderi/Desktop/AQP1 - Prototype/training_data/val/images

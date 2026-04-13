@@ -205,12 +205,18 @@ def _cv_detect_core(gray: np.ndarray, outer: tuple):
 
 def _yolo_line(cls_id: int, x1: int, y1: int, x2: int, y2: int,
                W: int, H: int) -> str:
-    """Convert absolute bbox to YOLO bounding-box format (class cx cy w h)."""
-    cx = ((x1 + x2) / 2) / W
-    cy = ((y1 + y2) / 2) / H
-    bw = (x2 - x1) / W
-    bh = (y2 - y1) / H
-    return f"{cls_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
+    """
+    Convert absolute bbox to YOLO segmentation polygon format.
+    Format: class x1 y1 x2 y1 x2 y2 x1 y2  (4 corners, normalised 0-1)
+    This is required for yolo*-seg.pt models — bbox format causes a crash.
+    """
+    nx1, nx2 = x1 / W, x2 / W
+    ny1, ny2 = y1 / H, y2 / H
+    return (f"{cls_id} "
+            f"{nx1:.6f} {ny1:.6f} "
+            f"{nx2:.6f} {ny1:.6f} "
+            f"{nx2:.6f} {ny2:.6f} "
+            f"{nx1:.6f} {ny2:.6f}")
 
 
 def headless_annotate_all(
@@ -281,54 +287,64 @@ def headless_annotate_all(
             continue
 
         H, W = frame.shape[:2]
-        outer_box = core_box = None
+        outer_box = core_box = s_wrap_box = None
+        best_per_cls = {}
 
         # 2. Try model-assisted annotation
         if yolo_model is not None:
             try:
                 results = yolo_model(frame, verbose=False)
                 if results and results[0].boxes is not None:
-                    detections = {0: [], 1: []}
+                    detections = {0: [], 1: [], 2: []}
                     for box in results[0].boxes:
                         cls_id = int(box.cls[0].item())
                         conf   = float(box.conf[0].item())
                         if cls_id in detections and conf >= conf_threshold:
                             x1, y1, x2, y2 = box.xyxy[0].tolist()
                             detections[cls_id].append((conf, int(x1), int(y1), int(x2), int(y2)))
-                    for cls_id in detections:
-                        if detections[cls_id]:
-                            best = max(detections[cls_id], key=lambda d: d[0])
-                            if cls_id == 0:
-                                outer_box = best[1:]
-                            else:
-                                core_box  = best[1:]
+                    best_per_cls = {}
+                    for cls_id, dets in detections.items():
+                        if dets:
+                            best_per_cls[cls_id] = max(dets, key=lambda d: d[0])[1:]
+                    outer_box  = best_per_cls.get(0)
+                    core_box   = best_per_cls.get(1)
+                    s_wrap_box = best_per_cls.get(2)
             except Exception as e:
                 log.warning("[%d/%d] Model inference failed: %s", i+1, len(images), e)
 
         # 3. Fall back to classical CV for any missing box
-        if outer_box is None or core_box is None:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if outer_box is None:
-                outer_box = _cv_detect_outer(gray)
-            if core_box is None:
-                core_box = _cv_detect_core(gray, outer_box)
-
-            if outer_box is None or core_box is None:
-                log.warning("[%d/%d] CV detection failed for %s", i+1, len(images), img_path.name)
-                n_failed += 1
-                continue
-
-            if yolo_model is not None:
-                n_cv += 1   # model ran but we used CV for at least one class
-            else:
-                n_cv += 1
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if outer_box is None:
+            outer_box = _cv_detect_outer(gray)
+        if core_box is None:
+            core_box = _cv_detect_core(gray, outer_box)
+        # S-Wrap: top AND bottom strips ~15 mm each — derive from outer_box height
+        if s_wrap_box is None and outer_box is not None:
+            ox1, oy1, ox2, oy2 = outer_box
+            sw_h = max(4, int((oy2 - oy1) * 15 / 370))
+            s_wrap_box = (ox1, oy1, ox2, oy1 + sw_h)   # top zone
+            s_wrap_bottom_box = (ox1, oy2 - sw_h, ox2, oy2)  # bottom zone
         else:
+            s_wrap_bottom_box = None
+
+        if outer_box is None or core_box is None:
+            log.warning("[%d/%d] CV detection failed for %s", i+1, len(images), img_path.name)
+            n_failed += 1
+            continue
+
+        if yolo_model is not None and best_per_cls.get(0) is not None:
             n_model += 1
+        else:
+            n_cv += 1
 
         # 4. Write YOLO label
         with open(lbl_path, "w") as f:
             f.write(_yolo_line(0, *outer_box, W, H) + "\n")
             f.write(_yolo_line(1, *core_box,  W, H) + "\n")
+            if s_wrap_box:
+                f.write(_yolo_line(2, *s_wrap_box,        W, H) + "\n")
+            if s_wrap_bottom_box:
+                f.write(_yolo_line(2, *s_wrap_bottom_box, W, H) + "\n")
 
         if (i + 1) % 100 == 0 or (i + 1) == len(images):
             log.info("  Annotated %d / %d  (model: %d  cv: %d  kept: %d  failed: %d)",
@@ -386,9 +402,20 @@ def prepare_dataset(size: str, val_split: float = 0.15) -> Path:
 
     random.seed(42)
     random.shuffle(labelled)
-    n_val   = max(1, int(len(labelled) * val_split))
-    n_train = len(labelled) - n_val
-    splits  = {"train": labelled[:n_train], "val": labelled[n_train:]}
+
+    # With very few images we can't afford a proper split — use all for both.
+    if len(labelled) < 5:
+        log.warning(
+            "Only %d labelled image(s) — using all for both train and val. "
+            "Add more images to Training Data S4/ for a proper split.",
+            len(labelled),
+        )
+        splits = {"train": labelled, "val": labelled}
+        n_train = n_val = len(labelled)
+    else:
+        n_val   = max(1, int(len(labelled) * val_split))
+        n_train = len(labelled) - n_val
+        splits  = {"train": labelled[:n_train], "val": labelled[n_train:]}
 
     log.info("Split → train: %d  |  val: %d", n_train, n_val)
 
@@ -566,7 +593,7 @@ def train(
     imgsz:            int   = None,
     batch_size:       int   = None,
     device:           str   = None,
-    ram_limit_gb:     float = 4.0,
+    ram_limit_gb:     float = 6.0,
     val_split:        float = 0.15,
     experiment_name:  str   = "aqp1_optimal",
     project_dir:      str   = "runs/segment",
@@ -748,6 +775,7 @@ def train(
         "copy_paste":    0.05,
 
         "iou":           0.45,
+        "rle":           0.0,     # disable semantic RLE loss — we use rectangular polygons, not dense masks
         "cos_lr":        True,
         "close_mosaic":  10,
         "cache":         False,   # never cache — saves RAM
@@ -919,8 +947,8 @@ Examples:
                         help="Batch size override (default: auto)")
     parser.add_argument("--device",       default=None,
                         help="Device: mps | cpu | 0 (CUDA). Auto-detected if omitted.")
-    parser.add_argument("--ram-limit",    type=float, default=4.0,
-                        help="RAM budget in GB (default: 4.0)")
+    parser.add_argument("--ram-limit",    type=float, default=6.0,
+                        help="RAM budget in GB (default: 6.0)")
     parser.add_argument("--val-split",    type=float, default=0.15,
                         help="Fraction of data held out for validation (default: 0.15)")
     parser.add_argument("--name",         default="aqp1_optimal",
