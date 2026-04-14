@@ -307,6 +307,8 @@ def run(images_dir: Path, labels_dir: Path, start_idx: int = 0) -> None:
         # Keep a copy of the detection/template so R can restore it
         restore_outer = list(outer_pts)
         restore_core  = list(core_pts)
+        restore_sw_top = list(sw_top_pts) if sw_top_pts else []
+        restore_sw_bot = list(sw_bot_pts) if sw_bot_pts else []
         active_region = 0
 
         # ── Per-image interaction loop ────────────────────────────────────────
@@ -338,13 +340,15 @@ def run(images_dir: Path, labels_dir: Path, start_idx: int = 0) -> None:
                 break
 
             elif key == ord("a"):           # Re-run auto-detection
-                outer_pts, core_pts = auto_detect(base)
+                outer_pts, core_pts, sw_top_pts, sw_bot_pts = auto_detect(base)
                 restore_outer, restore_core = list(outer_pts), list(core_pts)
+                restore_sw_top, restore_sw_bot = list(sw_top_pts), list(sw_bot_pts)
                 using_template = False
                 print(f"    [AUTO]  Re-detected regions")
 
             elif key == ord("r"):           # Restore template / auto-detect positions
                 outer_pts, core_pts = list(restore_outer), list(restore_core)
+                sw_top_pts, sw_bot_pts = list(restore_sw_top), list(restore_sw_bot)
 
             elif key == ord("\t"):          # TAB — switch active region
                 active_region = 1 - active_region
